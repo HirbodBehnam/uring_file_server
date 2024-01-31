@@ -92,7 +92,7 @@ void handle_file_path(struct request *req) {
     }
     // Otherwise, dispatch a read request from file
     req->event_type = EVENT_TYPE_READ_FILE;
-    io_uring_prep_read(sqe, req->file_fd, &req->buffer, REQUEST_BUFFER_SIZE, 0);
+    io_uring_prep_read(sqe, req->file_fd, &req->buffer, REQUEST_BUFFER_SIZE, -1);
     io_uring_sqe_set_data(sqe, req);
     io_uring_submit(&ring);
 }
@@ -186,6 +186,7 @@ void server_loop(int socket_fd) {
                 break;
             case EVENT_TYPE_404:
                 // We just send a 404 error to user. Close the socket and free the resources
+                shutdown(req->client_socket_fd, SHUT_RDWR);
                 close(req->client_socket_fd);
                 free(req);
                 break;
@@ -194,7 +195,8 @@ void server_loop(int socket_fd) {
                 if (cqe->res == 0) {
                     // EOF. Close everything
                     close(req->file_fd);
-                    close(req->event_type);
+                    shutdown(req->client_socket_fd, SHUT_RDWR);
+                    close(req->client_socket_fd);
                     free(req);
                     break;
                 }
