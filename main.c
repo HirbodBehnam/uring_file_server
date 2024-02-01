@@ -21,6 +21,8 @@ struct io_uring ring;
 struct request {
     int client_socket_fd;
     int file_fd;
+    int written_bytes_count;
+    int to_write_bytes_count;
     uint8_t event_type;
     char buffer[REQUEST_BUFFER_SIZE];
 };
@@ -106,7 +108,25 @@ void handle_file_read(int bytes_read, struct request *req) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     assert(sqe);
     req->event_type = EVENT_TYPE_WRITE;
+    req->to_write_bytes_count = bytes_read;
+    req->written_bytes_count = 0;
     io_uring_prep_write(sqe, req->client_socket_fd, &req->buffer, bytes_read, 0);
+    io_uring_sqe_set_data(sqe, req);
+    io_uring_submit(&ring);
+}
+
+/**
+ * Sometimes, we cannot write the whole buffer in the socket. In this case
+ * operating system returns a smaller number of bytes in compared to req->to_write_bytes_count.
+ * We simply dispatch another write request in order to fill the buffer.
+ * @param req The request data in the ring request.
+ */
+void handle_short_write(struct request *req) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+    assert(sqe);
+    req->event_type = EVENT_TYPE_WRITE;
+    io_uring_prep_write(sqe, req->client_socket_fd, &req->buffer[req->written_bytes_count],
+                        req->to_write_bytes_count - req->written_bytes_count, 0);
     io_uring_sqe_set_data(sqe, req);
     io_uring_submit(&ring);
 }
@@ -204,8 +224,15 @@ void server_loop(int socket_fd) {
                 handle_file_read(cqe->res, req);
                 break;
             case EVENT_TYPE_WRITE:
-                // We have written our data in the socket. Read more data...
-                handle_socket_write(req);
+                // We have written our data in the socket.
+                // Check how much we have written
+                req->written_bytes_count += cqe->res;
+                if (req->written_bytes_count == req->to_write_bytes_count) {
+                    handle_socket_write(req);
+                } else {
+                    // Short write, write again
+                    handle_short_write(req);
+                }
                 break;
         }
         // Done
